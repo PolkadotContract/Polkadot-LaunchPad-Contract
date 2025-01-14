@@ -1,11 +1,17 @@
 [package]
-name = "pump_fun"
+name = "token-lock"
 version = "0.1.0"
 authors = ["[your_name] <[your_email]>"]
 edition = "2021"
+publish = false
 
 [dependencies]
 ink = { version = "5.1.0", default-features = false }
+# Note: We **need** to specify the `ink-as-dependency` feature.
+#
+# If we don't we will end up with linking errors!
+token-contract = { path = "../token-contract", default-features = false, features = ["ink-as-dependency"] }
+
 
 [dev-dependencies]
 ink_e2e = { version = "5.1.0" }
@@ -17,11 +23,7 @@ path = "lib.rs"
 default = ["std"]
 std = [
     "ink/std",
+    "token-contract/std",
 ]
 ink-as-dependency = []
 e2e-tests = []
-
-[workspace]
-members = [
-    "bonding_curve_presale",
-]

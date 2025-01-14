@@ -1,18 +1,18 @@
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 
 #[ink::contract]
-mod workshop {
+mod pump_fun {
 
     /// Defines the storage of your contract.
     /// Add new fields to the below struct in order
     /// to add new static storage fields to your contract.
     #[ink(storage)]
-    pub struct Workshop {
+    pub struct PumpFun {
         /// Stores a single `bool` value on the storage.
         value: bool,
     }
 
-    impl Workshop {
+    impl PumpFun {
         /// Constructor that initializes the `bool` value to the given `init_value`.
         #[ink(constructor)]
         pub fn new(init_value: bool) -> Self {
@@ -53,17 +53,17 @@ mod workshop {
         /// We test if the default constructor does its job.
         #[ink::test]
         fn default_works() {
-            let workshop = Workshop::default();
-            assert_eq!(workshop.get(), false);
+            let pump_fun = PumpFun::default();
+            assert_eq!(pump_fun.get(), false);
         }
 
         /// We test a simple use case of our contract.
         #[ink::test]
         fn it_works() {
-            let mut workshop = Workshop::new(false);
-            assert_eq!(workshop.get(), false);
-            workshop.flip();
-            assert_eq!(workshop.get(), true);
+            let mut pump_fun = PumpFun::new(false);
+            assert_eq!(pump_fun.get(), false);
+            pump_fun.flip();
+            assert_eq!(pump_fun.get(), true);
         }
     }
 
@@ -88,15 +88,15 @@ mod workshop {
         #[ink_e2e::test]
         async fn default_works(mut client: ink_e2e::Client<C, E>) -> E2EResult<()> {
             // Given
-            let mut constructor = WorkshopRef::default();
+            let mut constructor = PumpFunRef::default();
 
             // When
             let contract = client
-                .instantiate("workshop", &ink_e2e::alice(), &mut constructor)
+                .instantiate("pump_fun", &ink_e2e::alice(), &mut constructor)
                 .submit()
                 .await
                 .expect("instantiate failed");
-            let call_builder = contract.call_builder::<Workshop>();
+            let call_builder = contract.call_builder::<PumpFun>();
 
             // Then
             let get = call_builder.get();
@@ -110,13 +110,13 @@ mod workshop {
         #[ink_e2e::test]
         async fn it_works(mut client: ink_e2e::Client<C, E>) -> E2EResult<()> {
             // Given
-            let mut constructor = WorkshopRef::new(false);
+            let mut constructor = PumpFunRef::new(false);
             let contract = client
-                .instantiate("workshop", &ink_e2e::bob(), &mut constructor)
+                .instantiate("pump_fun", &ink_e2e::bob(), &mut constructor)
                 .submit()
                 .await
                 .expect("instantiate failed");
-            let mut call_builder = contract.call_builder::<Workshop>();
+            let mut call_builder = contract.call_builder::<PumpFun>();
 
             let get = call_builder.get();
             let get_result = client.call(&ink_e2e::bob(), &get).dry_run().await?;

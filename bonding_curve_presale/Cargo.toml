@@ -6,6 +6,12 @@ edition = "2021"
 
 [dependencies]
 ink = { version = "5.1.0", default-features = false }
+#token-contract = { path = "token-contract", default-features = false, features = ["ink-as-dependency"] }
+token-factory = { path = "../token-factory", default-features = false, features = ["ink-as-dependency"] }
+token-lock = { path = "../token-lock", default-features = false, features = ["ink-as-dependency"] }
+
+#ink_lang = "3.4.0"
+#ink_env = "5.1.0"
 
 [dev-dependencies]
 ink_e2e = { version = "5.1.0" }
@@ -17,6 +23,11 @@ path = "lib.rs"
 default = ["std"]
 std = [
     "ink/std",
+#   "ink_env/std",
+#    "token-contract/std",
+    "token-factory/std",
+    "token-lock/std",
+
 ]
 ink-as-dependency = []
 e2e-tests = []

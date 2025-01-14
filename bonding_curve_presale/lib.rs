@@ -1,282 +1,486 @@
-#![cfg_attr(not(feature = "std"), no_std)]
-
-use ink::prelude::vec::Vec;
-use ink::storage::Mapping;
+#![cfg_attr(not(feature = "std"), no_std, no_main)]
+pub use self::bonding_curve_presale::BondingCurvePresale;
 
 #[ink::contract]
 mod bonding_curve_presale {
-    use super::*;
-    /// Defines the storage of your contract.
-    /// Add new fields to the below struct in order
-    /// to add new static storage fields to your contract.
+    use token_factory::TokenFactoryRef;
+    use token_lock::TokenLockRef;
+    use ink::storage::{
+        Mapping as StorageHashMap
+    };
+    use ink::prelude::string::String;
+    use ink::prelude::{
+        vec::Vec,
+    };
 
-    const DECIMALS: u128 = 1e18 as u128;
-    const PRICE_CHANGE_SLOPE: u128 = 0.01e18 as u128;
-    const BASE_PRICE: u128 = 0.01e18 as u128;
-    const LOCK_PERIOD: u128 = 6 * 30 * 24 * 60 * 60; // 6 months in seconds
-    const LOCK_PERCENTAGE: u128 = 10e16 as u128; // 10%
-
-    #[ink(storage)]
-    pub struct BondingCurvePresale {
-        /// Stores a single `bool` value on the storage.
-        projects: Mapping<u32, Project>,
-        last_project_id: u32,
-        tokens_owed_to_contributor: Mapping<(u128, AccountId), u128>,
-        fee_collector: AccountId,
-        successful_end_fee: u128,
-    }
-
-    #[derive(Clone)]
+    #[ink::scale_derive(Encode, Decode, TypeInfo)]
     #[cfg_attr(
         feature = "std",
-        derive(Debug, PartialEq, Eq, ink::storage::traits::StorageLayout)
+        derive(ink::storage::traits::StorageLayout)
     )]
-    #[ink::scale_derive(Encode, Decode, TypeInfo)]
-    pub enum ProjectStatus {
-        Pending,
-        Success,
-        Failed,
-    }
-
-    #[derive(Clone)]
-    #[cfg_attr(
-        feature = "std",
-        derive(Debug, PartialEq, Eq, ink::storage::traits::StorageLayout)
-    )]
-    #[ink::scale_derive(Encode, Decode, TypeInfo)]
     pub struct Project {
         token: AccountId,
-        initial_token_amount: Balance,
-        raised: Balance,
-        start_time: u64,
-        end_time: u64,
+        total_presale_token_amount: Balance,
+        presaled_amount: Balance,
+        intended_raise_amount: Balance,
+        raised_amount: Balance,
+        start_time: Timestamp,
+        end_time: Timestamp,
         creator: AccountId,
         contributors: Vec<AccountId>,
-        status: ProjectStatus,
-        price_after_failure: u64,
-        creator_claimed_locked_tokens: bool,
+        is_finished: bool,
+        is_successful: bool,
+    }
+    #[ink(storage)]
+    pub struct BondingCurvePresale {
+        projects: StorageHashMap<u32, Project>,
+        last_project_id: u32,
+        token_factory: TokenFactoryRef,
+        token_lock: TokenLockRef,
     }
 
-
     impl BondingCurvePresale {
-        /// Constructor that initializes the `bool` value to the given `init_value`.
         #[ink(constructor)]
-        pub fn new(fee_collector: AccountId, successful_end_fee: u128) -> Self {
-            Self {
-                projects: Mapping::new(),
-                last_project_id: 0,
-                tokens_owed_to_contributor: Mapping::new(),
-                fee_collector,
-                successful_end_fee,
-            }
+        pub fn new(token_factory_address: AccountId, token_lock_address: AccountId) -> Self {
+            let token_factory: TokenFactoryRef = ink::env::call::FromAccountId::from_account_id(token_factory_address);
+            let token_lock: TokenLockRef = ink::env::call::FromAccountId::from_account_id(token_lock_address);
+            
+            Self { token_factory, token_lock, last_project_id: 0, projects: StorageHashMap::new()}
         }
 
-        #[ink(message)]
+        #[ink(message, payable)]
+        #[allow(clippy::too_many_arguments)]
         pub fn create_presale(
             &mut self,
-            token: AccountId,
-            initial_token_amount: u128,
-            start_time: u64,
-            end_time: u64,
-        ) {
-            assert!(start_time > Self::env().block_timestamp(), "Start time must be in the future.");
-            assert!(end_time > start_time, "End time must be after start time.");
-            assert!(initial_token_amount % 2 == 0, "Initial token amount must be even.");
+            max_supply: Balance,
+            name: String,
+            symbol: String,
+            decimals: u8,
+            logo_uri: String,
+            lock_amount: Balance,
+            lock_duartion: Timestamp,
+            intended_raise_amount: Balance,
+            start_time: Timestamp,
+            end_time: Timestamp,
+        ) -> Project {
+            let project_id = self.last_project_id.checked_add(1).expect("Overflow detected in project_id calculation");
+            self.last_project_id = project_id;
 
-            self.last_project_id += 1;
-            // create new token here
+            let token_address = self.token_factory
+            // .call()
+            // .transferred_value(self.env().transferred_value()) // Send the value
+            .create_token(max_supply, name, symbol, decimals, logo_uri);
+            
+            let _ = self.token_lock.create_lock(token_address, self.env().caller(), lock_amount, lock_duartion);
 
-            ////////////////////////
             let project = Project {
-                token,
-                initial_token_amount,
-                raised: 0,
+                token: token_address,
+                total_presale_token_amount: max_supply.checked_sub(lock_amount).expect("error"),
+                presaled_amount: 0,
+                intended_raise_amount,
+                raised_amount: 0,
                 start_time,
                 end_time,
-                creator: Self::env().caller(),
+                creator: self.env().caller(),
                 contributors: Vec::new(),
-                status: ProjectStatus::Pending,
-                price_after_failure: 0,
-                creator_claimed_locked_tokens: false,
+                is_finished: false,
+                is_successful: false,
             };
 
-            self.projects.insert(self.last_project_id, &project);
+            self.projects.insert(project_id, &project);
+
+            project
         }
 
-        #[ink(message)]
+
+        #[ink(message, payable)]
         pub fn join_project_presale(
             &mut self,
             project_id: u32,
-            expected_token_amount: Balance,
-        ) {
+            buy_token_amount: Balance,
+        ) -> Project {
             let caller = self.env().caller();
-            let mut project = self.projects.get(&project_id).expect("Project not found");
-            
-            // Check various conditions
-            assert!(project.status == ProjectStatus::Pending, "Presale already ended");
-            assert!(project.start_time <= self.env().block_timestamp(), "Presale not started");
-            assert!(project.end_time > self.env().block_timestamp(), "Presale ended");
+            let mut project = self.projects.get(project_id).expect("Project not found");
 
-            // Calculate the token amount and update the project
-            let mut token_amount = self.calculate_buy_amount(project.initial_token_amount, project.raised);
-            
-            // Ensure user is not contributing more than allowed
-            let max_tokens = project.initial_token_amount / 2;
-            let remaining_tokens = max_tokens - project.raised;
-            if token_amount > remaining_tokens {
-                token_amount = remaining_tokens;
-            }
-            assert!(token_amount >= expected_token_amount, "Lack of token");
+            assert!(project.start_time <= self.time_now(), "Presale not started");
+            assert!(project.end_time > self.time_now(), "Presale ended");
 
-            // Update the project and contributor's tokens
-            project.raised += token_amount;
-            if !project.contributors.contains(&caller) {
-                project.contributors.push(caller);
-            }
-            // here update contributors tokens
+            let cost = self.calculate_price(project.presaled_amount, buy_token_amount);
+            assert!(cost < self.env().transferred_value(), "Insufficient payment");
+            assert!(project.presaled_amount.checked_add(buy_token_amount) < Some(project.total_presale_token_amount), "Insufficient amount");
 
-            //////////////////////////////////
-            // Emit event
-            self.env().emit_event(UserJoinedProject {
-                project_id,
-                contributor: caller,
-                token_amount,
-            });
+            project.presaled_amount = project.presaled_amount.checked_add(buy_token_amount).expect("Invalid Operation");
+            project.raised_amount = project.raised_amount.checked_add(cost).expect("Invalid Operation");
+            project.contributors.push(caller);
+
+            project
         }
 
         #[ink(message)]
-        pub fn leave_ongoing_project_presale(
+        pub fn finish_presale(
             &mut self,
-            id: u32,
-            expected_eth_amount: Balance,
-        ) {
-            // Ensure project ID is valid
-            let mut project = self.projects.get(&id).expect("Project not found");
-            
-            // Ensure project status is Pending
-            assert!(project.status == ProjectStatus::Pending, "Presale already ended");
-            
-            // Ensure the project has started
-            assert!(project.start_time <= self.env().block_timestamp(), "Presale not started");
-            
-            // Ensure the project has not ended
-            assert!(project.end_time > self.env().block_timestamp(), "Presale ended");
+            project_id: u32,
+        ) -> Project {
+            let mut project = self.projects.get(project_id).expect("Project not found");
 
-            
-            // Get the token amount owed to the caller
-            // let caller = self.env().caller();
-            // let token_amount = *self.tokens_owed_to_contributor.get(&(id, caller)).unwrap_or(&0);
-            
-            // // Check if the token amount is greater than zero
-            // assert!(token_amount > 0, "No tokens owed to the caller");
-            
-            // // Check if the user has enough token balance
-            // let user_balance = self.token_balances.get(&(id, caller)).unwrap_or(&0);
-            // assert!(*user_balance > token_amount, "Insufficient token balance");
-            
-            // // Calculate the ETH amount the user should receive
-            // let old_supply = project.initial_token_amount - self.token_supply.get(&id).unwrap_or(&0);
-            // let eth_amount = self.calculate_sell_amount(token_amount, *old_supply);
-            
-            // // Ensure the ETH amount is not less than the expected amount
-            // if eth_amount < expected_eth_amount {
-            //     return Err("ETH amount is less than expected".into());
-            // }
-            
-            // // Update the project's raised ETH amount
-            // self.projects.get_mut(&id).unwrap().raised -= eth_amount;
-            
-            // // Reset the tokens owed to the contributor
-            // self.tokens_owed_to_contributor.insert((id, caller), 0);
-            
-            // // Transfer the tokens back to the contract
-            // self.token_balances.insert((id, caller), user_balance - token_amount);
-            // let contract_balance = self.token_balances.get(&(id, self.env().account_id())).unwrap_or(&0);
-            // self.token_balances.insert((id, self.env().account_id()), contract_balance + token_amount);
-            
-            // // Send ETH to the user
-            // self.env()
-            //     .transfer(caller, eth_amount)
-            //     .map_err(|_| "Failed to send ETH to the user")?;
-            
-            // Emit an event
-            // self.env().emit_event(UserLeftPendingProject {
-            //     id,
-            //     contributor: caller,
-            //     token_amount,
-            //     eth_amount,
-            // });
-            
-        }
-
-        #[ink(message)]
-        pub fn end_presale(&mut self, id: u32) {
-            let project = self.projects.get(&id).expect("Project does not exist.");
-            assert!(
-                project.end_time < Self::env().block_timestamp(),
-                "Project has not ended yet."
-            );
-
-            let is_successful = project.raised >= self.get_soft_cap(id);
-            let mut updated_project = project.clone();
-            updated_project.status = if is_successful {
-                ProjectStatus::Success
-            } else {
-                ProjectStatus::Failed
+            assert!(project.end_time > self.time_now(), "Presale not finished");
+            project.is_finished = true;
+            project.is_successful = match (
+                project.intended_raise_amount.checked_mul(3),
+                project.raised_amount.checked_mul(10),
+            ) {
+                (Some(intended), Some(raised)) => intended <= raised,
+                _ => {
+                    // Handle overflow explicitly, for example:
+                    false
+                },
             };
 
-            if is_successful {
-                // Logic for successful presale
-            } else {
-                // Logic for failed presale
-            }
-
-            self.projects.insert(&id, &updated_project);
+            project
+            // Add more logic here
         }
 
         #[ink(message)]
-        pub fn calculate_buy_amount(
+        pub fn calculate_price(
             &self,
-            total_supply: Balance,
-            total_raised: Balance,
+            presaled_amount: Balance,
+            buy_token_amount: Balance,
         ) -> Balance {
-            // Implement bonding curve logic here, similar to Solidity's
-            total_raised * 10u128.pow(18) / total_supply
+            let k: Balance = 1;
+            let c: Balance = 0;
+
+            let current_price = k.checked_mul(presaled_amount).unwrap_or(0).checked_add(c).unwrap_or(0);
+            let next_price = k
+                .checked_mul(presaled_amount.checked_add(buy_token_amount).unwrap_or(0))
+                .unwrap_or(0)
+                .checked_add(c)
+                .unwrap_or(0);
+
+            current_price
+                .checked_add(next_price)
+                .unwrap_or(0)
+                .checked_mul(buy_token_amount)
+                .unwrap_or(0)
+                .checked_div(2)
+                .unwrap_or(0)
         }
 
-        fn get_soft_cap(&self, id: u32) -> u128 {
-            let project = self.projects.get(&id).expect("Project does not exist.");
-            project.initial_token_amount * 3 / 10 //30%
+        #[ink(message)]
+        pub fn time_now(&self) -> Timestamp {
+            self.env().block_timestamp()
         }
     }
 
-    #[ink(event)]
-    pub struct UserJoinedProject {
-        #[ink(topic)]
-        project_id: u32,
-        #[ink(topic)]
-        contributor: AccountId,
-        token_amount: Balance,
-    }
-
-    #[ink(event)]
-    pub struct UserLeftPendingProject {
-        #[ink(topic)]
-        project_id: u32,
-        #[ink(topic)]
-        contributor: AccountId,
-        token_amount: Balance,
-        eth_amount: Balance
-    }
-
-    /// Unit tests in Rust are normally defined within such a `#[cfg(test)]`
-    /// module and test functions are marked with a `#[test]` attribute.
-    /// The below code is technically just normal Rust code.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "e2e-tests"))]
     mod tests {
-        /// Imports all the definitions from the outer scope so we can use them here.
         use super::*;
+        use ink_e2e::ContractsBackend;
+        type E2EResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-       
+        #[ink_e2e::test]
+        async fn create_presale_works<Client: E2EBackend>(mut client: Client,) -> E2EResult<()> {
+            println!("TEST OF CREATING PRESALE");
+            let accounts =
+                ink::env::test::default_accounts::<ink::env::DefaultEnvironment>();
+
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.alice);
+            ink::env::test::set_value_transferred::<ink::env::DefaultEnvironment>(1_000_000_000);
+            println!("Creating token-factory contract");
+            let token_contract_code = client
+                .upload("token-contract", &ink_e2e::alice())
+                .submit()
+                .await
+                .expect("other_contract upload failed");
+
+            const FEE_LIMIT: u128 = 0;
+
+            let mut token_factory_constructor = TokenFactoryRef::new(token_contract_code.code_hash, FEE_LIMIT);
+            let token_factory = client
+                .instantiate("token-factory", &ink_e2e::alice(), &mut token_factory_constructor)
+                .submit()
+                .await
+                .expect("token-factory instantiate failed");
+            println!("Created token-factory contract");
+            let token_factory_address = token_factory.account_id;
+            println!("Creating token-lock contract");
+            let mut token_lock_constructor = TokenLockRef::new();
+            let token_lock = client
+                .instantiate("token-lock", &ink_e2e::alice(), &mut token_lock_constructor)
+                .submit()
+                .await
+                .expect("token-lock instantiate failed");
+
+            let token_lock_address = token_lock.account_id;
+
+            let mut constructor = BondingCurvePresaleRef::new(token_factory_address, token_lock_address);
+            let contract = client
+                .instantiate("bonding-curve-presale", &ink_e2e::alice(), &mut constructor)
+                .submit()
+                .await
+                .expect("bonding-curve-presale instantiate failed");
+            println!("Created token-lock contract");
+            let mut call_builder = contract.call_builder::<BondingCurvePresale>();
+            println!("Creating presale...");
+            let time_now = call_builder.time_now();
+            let result = client
+                .call(&ink_e2e::alice(), &time_now)
+                .submit()
+                .await
+                .expect("Calling `time_now` failed")
+                .return_value();
+
+            let start_time = result;
+            let end_time = result + 100000000;
+            let create_presale = call_builder.create_presale(
+                1_000_000,
+                String::from("TestToken"),
+                String::from("TTK"),
+                18,
+                String::from("https://logo.uri"),
+                100_000,
+                3600,
+                900_000,
+                start_time,
+                end_time,
+            );
+
+            let result = client
+                .call(&ink_e2e::alice(), &create_presale)
+                .value(FEE_LIMIT)
+                .submit()
+                .await
+                .expect("Calling `create_presale` failed")
+                .return_value();
+            println!("Created presale");
+
+            assert_eq!(result.total_presale_token_amount, 900_000);
+            assert_eq!(result.intended_raise_amount, 900_000);
+            println!("FINISEHD TEST OF CREATING PRESALE");
+            Ok(())
+        }
+
+        #[ink_e2e::test]
+        async fn join_project_presale_works<Client: E2EBackend>(mut client: Client,) -> E2EResult<()> {
+            println!("TEST OF JOINNING PRESALE");
+            let accounts =
+                ink::env::test::default_accounts::<ink::env::DefaultEnvironment>();
+            println!("Creating token-factory contract");
+            let token_contract_code = client
+                .upload("token-contract", &ink_e2e::alice())
+                .submit()
+                .await
+                .expect("other_contract upload failed");
+
+            const FEE_LIMIT: u128 = 0;
+
+            let mut token_factory_constructor = TokenFactoryRef::new(token_contract_code.code_hash, FEE_LIMIT);
+            let token_factory = client
+                .instantiate("token-factory", &ink_e2e::alice(), &mut token_factory_constructor)
+                .submit()
+                .await
+                .expect("token-factory instantiate failed");
+            println!("Created token-factory contract");
+            let token_factory_address = token_factory.account_id;
+            println!("Creating token-lock contract");
+            let mut token_lock_constructor = TokenLockRef::new();
+            let token_lock = client
+                .instantiate("token-lock", &ink_e2e::alice(), &mut token_lock_constructor)
+                .submit()
+                .await
+                .expect("token-lock instantiate failed");
+
+            let token_lock_address = token_lock.account_id;
+            
+            let mut constructor = BondingCurvePresaleRef::new(token_factory_address, token_lock_address);
+            let contract = client
+                .instantiate("bonding-curve-presale", &ink_e2e::alice(), &mut constructor)
+                .submit()
+                .await
+                .expect("bonding-curve-presale instantiate failed");
+            println!("Created token-lock contract");
+            let mut call_builder = contract.call_builder::<BondingCurvePresale>();
+            println!("Creating presale...");
+            let time_now = call_builder.time_now();
+            let result = client
+                .call(&ink_e2e::alice(), &time_now)
+                .submit()
+                .await
+                .expect("Calling `time_now` failed")
+                .return_value();
+
+            let start_time = result;
+            let end_time = result + 100000000;
+
+            let create_presale = call_builder.create_presale(
+                1_000_000,
+                String::from("TestToken"),
+                String::from("TTK"),
+                18,
+                String::from("https://logo.uri"),
+                100_000,
+                3600,
+                900_000,
+                start_time,
+                end_time,
+            );
+
+            let result = client
+                .call(&ink_e2e::alice(), &create_presale)
+                .value(FEE_LIMIT)
+                .submit()
+                .await
+                .expect("Calling `create_presale` failed")
+                .return_value();
+            println!("Created presale");
+            assert_eq!(result.total_presale_token_amount, 900_000);
+            assert_eq!(result.intended_raise_amount, 900_000);
+
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.charlie);
+            ink::env::test::set_value_transferred::<ink::env::DefaultEnvironment>(10_000_000_000);
+            println!("Joining to presale...");
+            let calculate_price = call_builder.calculate_price(result.presaled_amount, 100);
+            client
+                .call(&ink_e2e::charlie(), &calculate_price)
+                .submit()
+                .await
+                .expect("Calling `calculate_price` failed")
+                .return_value();
+
+            let join_presale = call_builder.join_project_presale(1, 100);
+
+            let result = client
+                .call(&ink_e2e::charlie(), &join_presale)
+                .value(100000)
+                .submit()
+                .await
+                .expect("Calling `join_presale` failed")
+                .return_value();
+            println!("Joinned to presale bought {:?} tokens", 100);
+            // let project = contract.projects.get(1).expect("Project should exist");
+            assert_eq!(result.presaled_amount, 100);
+            assert_eq!(result.contributors.len(), 1);
+            // assert_eq!(result.contributors[0], accounts.charlie);
+            println!("FINISHED TEST OF JOINING PRESALE");
+            Ok(())
+        }
+
+        #[ink_e2e::test]
+        async fn finish_presale_works<Client: E2EBackend>(mut client: Client,) -> E2EResult<()> {
+            println!("TEST OF FINISHING PRESALE");
+            let accounts =
+                ink::env::test::default_accounts::<ink::env::DefaultEnvironment>();
+            println!("Creating token-factory contract");
+            let token_contract_code = client
+            .upload("token-contract", &ink_e2e::alice())
+            .submit()
+            .await
+            .expect("other_contract upload failed");
+
+            const FEE_LIMIT: u128 = 0;
+
+            let mut token_factory_constructor = TokenFactoryRef::new(token_contract_code.code_hash, FEE_LIMIT);
+            let token_factory = client
+                .instantiate("token-factory", &ink_e2e::alice(), &mut token_factory_constructor)
+                .submit()
+                .await
+                .expect("token-factory instantiate failed");
+            println!("Created token-factory contract");
+            let token_factory_address = token_factory.account_id;
+            println!("Creating token-lock contract");   
+            let mut token_lock_constructor = TokenLockRef::new();
+            let token_lock = client
+                .instantiate("token-lock", &ink_e2e::alice(), &mut token_lock_constructor)
+                .submit()
+                .await
+                .expect("token-lock instantiate failed");
+
+            let token_lock_address = token_lock.account_id;
+
+            let mut constructor = BondingCurvePresaleRef::new(token_factory_address, token_lock_address);
+            let contract = client
+                .instantiate("bonding-curve-presale", &ink_e2e::alice(), &mut constructor)
+                .submit()
+                .await
+                .expect("bonding-curve-presale instantiate failed");
+            println!("Created token-lock contract");
+            let mut call_builder = contract.call_builder::<BondingCurvePresale>();
+            println!("Creating presale...");
+            let time_now = call_builder.time_now();
+            let result = client
+                .call(&ink_e2e::alice(), &time_now)
+                .submit()
+                .await
+                .expect("Calling `time_now` failed")
+                .return_value();
+
+            let start_time = result;
+            let end_time = result + 100000000;
+
+            let create_presale = call_builder.create_presale(
+                1_000_000,
+                String::from("TestToken"),
+                String::from("TTK"),
+                18,
+                String::from("https://logo.uri"),
+                100_000,
+                3600,
+                900_000,
+                start_time,
+                end_time,
+            );
+
+            let result = client
+                .call(&ink_e2e::alice(), &create_presale)
+                .value(FEE_LIMIT)
+                .submit()
+                .await
+                .expect("Calling `create_presale` failed")
+                .return_value();
+            println!("Created presale");
+            assert_eq!(result.total_presale_token_amount, 900_000);
+            assert_eq!(result.intended_raise_amount, 900_000);
+
+            ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.charlie);
+            ink::env::test::set_value_transferred::<ink::env::DefaultEnvironment>(1_000_000);
+            println!("Joining to presale...");
+            let calculate_price = call_builder.calculate_price(result.presaled_amount, 100);
+            client
+                .call(&ink_e2e::alice(), &calculate_price)
+                .submit()
+                .await
+                .expect("Calling `calculate_price` failed")
+                .return_value();
+
+            let join_presale = call_builder.join_project_presale(1, 100);
+
+            let result = client
+                .call(&ink_e2e::charlie(), &join_presale)
+                .value(100000)
+                .submit()
+                .await
+                .expect("Calling `join_presale` failed")
+                .return_value();
+
+            // let project = contract.projects.get(1).expect("Project should exist");
+            assert_eq!(result.presaled_amount, 100);
+            assert_eq!(result.contributors.len(), 1);
+            // assert_eq!(result.contributors[0], accounts.charlie);
+            println!("Joinned to presale bought {:?} tokens", 100);
+            let finish_presale = call_builder.finish_presale(1);
+            println!("Finishing presale");
+            let result = client
+                .call(&ink_e2e::alice(), &finish_presale)
+                .submit()
+                .await
+                .expect("Calling `finish_presale` failed")
+                .return_value();
+            println!("Finished presale");
+            // let project = contract.projects.get(1).expect("Project should exist");
+            assert!(result.is_finished);
+            assert!(!result.is_successful);
+            println!("FINISHED TEST OF FINISHING PRESALE");
+            Ok(())
+        }
     }
+
 }
